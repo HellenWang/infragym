@@ -47,10 +47,12 @@ install_chaos_mesh() {
   log "安装 chaos-mesh..."
   helm repo add chaos-mesh https://charts.chaos-mesh.org >/dev/null 2>&1 || true
   helm repo update chaos-mesh >/dev/null
+  # 演练环境单副本足够：关掉 leader-election 省内存，不装 dashboard
   helm install chaos-mesh chaos-mesh/chaos-mesh \
     --namespace chaos-mesh --create-namespace \
     --set dashboard.create=false \
-    --set controllerManager.resources.requests.cpu=10m \
+    --set controllerManager.leaderElection.enabled=false \
+    --set controllerManager.replicas=1 \
     --wait --timeout 5m
   log "chaos-mesh 安装完成"
 }
