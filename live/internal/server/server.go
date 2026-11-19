@@ -191,10 +191,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, id string)
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan analyze.Event, 64)
+	ch := make(chan analyze.Event, 256)
 	s.mu.Lock()
 	sess.subs[ch] = struct{}{}
 	already := append([]analyze.Event(nil), sess.events...)
+	done := sess.done
 	s.mu.Unlock()
 
 	defer func() {
@@ -208,29 +209,69 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request, id string)
 		fmt.Fprintf(w, "event: tick\ndata: %s\n\n", data)
 		flusher.Flush()
 	}
+	// 断线重连时先把历史事件全量重放，客户端按 seq 去重即可无缝续上
 	for _, e := range already {
 		send(e)
 	}
+	if done {
+		// 实验已结束。若历史事件里已含完成哨兵就不重复补发；
+		// 否则补发一个（带真实 seq，客户端据此去重）。
+		hasDone := len(already) > 0 && already[len(already)-1].Phase == "__done__"
+		if !hasDone {
+			send(analyze.Event{
+				Seq: len(already) + 1, At: time.Now(),
+				Phase: "__done__", Type: "ok", Message: "实验已完成",
+			})
+		}
+		return
+	}
+
+	// 心跳：每 10 秒一个注释帧，防止 CDN/代理因空闲掐断长连接
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ticker.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		case e, open := <-ch:
 			if !open {
 				return
 			}
 			send(e)
+			if e.Phase == "__done__" {
+				return
+			}
 		}
 	}
 }
 
-// emit 记录事件并广播给所有订阅者。
+// emit 记录事件并广播给所有订阅者。seq 单调递增，客户端据此去重。
 func (s *Server) emit(sess *session, typ, phase, msg string, ready, total int) {
 	e := analyze.Event{
+		Seq: len(sess.events) + 1,
 		At: time.Now(), Type: typ, Phase: phase,
 		Message: msg, Ready: ready, Total: total,
 	}
+	s.broadcast(sess, e)
+	log.Printf("[%s] %-5s %-8s %s", sess.id, typ, phase, msg)
+}
+
+// emitDone 广播完成哨兵。不关闭 channel，避免多个订阅者竞态写；
+// 客户端收到 __done__ 后自行断开 EventSource。
+func (s *Server) emitDone(sess *session) {
+	s.broadcast(sess, analyze.Event{
+		Seq: len(sess.events) + 1,
+		At: time.Now(), Type: "ok", Phase: "__done__",
+		Message: "实验完成",
+	})
+}
+
+// broadcast 写入事件并推送给所有订阅者。调用方须持有 sess 变更权。
+func (s *Server) broadcast(sess *session, e analyze.Event) {
 	s.mu.Lock()
 	sess.events = append(sess.events, e)
 	for ch := range sess.subs {
@@ -240,7 +281,6 @@ func (s *Server) emit(sess *session, typ, phase, msg string, ready, total int) {
 		}
 	}
 	s.mu.Unlock()
-	log.Printf("[%s] %-5s %-8s %s", sess.id, typ, phase, msg)
 }
 
 // runExperiment 编排一次演练。真实模式连集群，mock 模式驱动模拟数据。
@@ -257,14 +297,11 @@ func (s *Server) runMockExperiment(sess *session, req CreateRequest) {
 	mq, ok := s.collector.Queryer().(*metrics.MockQueryer)
 	defer func() {
 		s.mu.Lock()
-		sess.done = true
 		res := analyze.Analyze(sess.events)
 		sess.result = &res
-		for ch := range sess.subs {
-			close(ch)
-		}
-		sess.subs = make(map[chan analyze.Event]struct{})
+		sess.done = true
 		s.mu.Unlock()
+		s.emitDone(sess)
 	}()
 
 	base, _ := s.collector.Snapshot()
@@ -298,15 +335,11 @@ func (s *Server) runMockExperiment(sess *session, req CreateRequest) {
 func (s *Server) runRealExperiment(sess *session, req CreateRequest) {
 	defer func() {
 		s.mu.Lock()
-		sess.done = true
 		res := analyze.Analyze(sess.events)
 		sess.result = &res
-		// 关闭所有订阅 channel，让 SSE 自然结束
-		for ch := range sess.subs {
-			close(ch)
-		}
-		sess.subs = make(map[chan analyze.Event]struct{})
+		sess.done = true
 		s.mu.Unlock()
+		s.emitDone(sess)
 		// 兜底清理：防止 chaos 资源残留
 		if err := s.cleanupChaos(sess); err != nil {
 			log.Printf("[%s] 清理失败: %v", sess.id, err)

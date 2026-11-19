@@ -6,10 +6,11 @@ import "time"
 
 // Event 是一条带时间戳的观测事件。
 type Event struct {
+	Seq      int       `json:"seq"`      // 单调递增序号，供客户端断线重连后去重
 	At       time.Time `json:"at"`
-	Type     string    `json:"type"`     // info / warn / error / ok / step
+	Type     string    `json:"type"`     // info / warn / error / ok
 	Message  string    `json:"message"`
-	Phase    string    `json:"phase"`    // inject / detect / mitigate / recover
+	Phase    string    `json:"phase"`    // inject / detect / mitigate / recover / __done__
 	Ready    int       `json:"ready"`    // 当时的就绪副本数
 	Total    int       `json:"total"`
 }

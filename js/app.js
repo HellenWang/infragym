@@ -76,7 +76,10 @@
     liveConnected: false,
     liveSource: '',       // 'real' | 'mock'
     liveT0: 0,
-    liveResult: null
+    liveResult: null,
+    liveLastSeq: 0,       // SSE 去重游标
+    liveEs: null,         // 当前 EventSource 引用
+    liveExpId: null
   };
 
   var canvas, g, cw = 0, ch = 0, dpr = 1, lastTs = 0;
@@ -405,9 +408,13 @@
   }
 
   function wireLiveEvent(ev) {
+    // 断线重连后服务端会全量重放历史，用 seq 去重，避免时间线重复
+    if (ev.seq && ev.seq <= state.liveLastSeq) return;
+    if (ev.seq) state.liveLastSeq = ev.seq;
+
     var type = ev.type || 'info';
     var msg = ev.message || '';
-    // Go 的 phase：inject / detect / mitigate / recover
+    // Go 的 phase：inject / detect / mitigate / recover / __done__
     pushTimeline({ t: 0, type: type, msg: msg });
     var frame = buildLiveFrame(ev.ready, ev.total, ev.phase);
     state.curFrame = frame;
@@ -422,6 +429,26 @@
     if (!state.liveT0) state.liveT0 = new Date(ev.at).getTime();
     var dt = (new Date(ev.at).getTime() - state.liveT0) / 1000;
     $('simClock').textContent = 'T+' + dt.toFixed(1).padStart(5, '0') + 's';
+
+    // 完成哨兵：拉最终结果并收尾
+    if (ev.phase === '__done__') finalizeLiveRun();
+  }
+
+  function closeLiveStream() {
+    if (state.liveEs) {
+      try { state.liveEs.close(); } catch (e) {}
+      state.liveEs = null;
+    }
+  }
+
+  function finalizeLiveRun() {
+    closeLiveStream();
+    var id = state.liveExpId;
+    if (!id) { finishLive(null); return; }
+    fetch(apiBase() + '/api/experiments/' + id)
+      .then(function (r) { return r.json(); })
+      .then(function (full) { finishLive(full.result); })
+      .catch(function () { finishLive(null); });
   }
 
   function finishLive(result) {
@@ -475,18 +502,20 @@
         return r.json();
       })
       .then(function (j) {
+        state.liveExpId = j.id;
+        state.liveLastSeq = 0;
         var es = new EventSource(apiBase() + j.stream);
+        state.liveEs = es;
         es.addEventListener('tick', function (e) {
           var ev = JSON.parse(e.data);
           wireLiveEvent(ev);
         });
+        // 长连接中断不放弃：EventSource 原生自动重连，
+        // 服务端会重放历史事件 + 补发完成哨兵，前端靠 seq 去重。
         es.onerror = function () {
-          es.close();
-          fetch(apiBase() + '/api/experiments/' + j.id).then(function (r) { return r.json(); })
-            .then(function (full) {
-              finishLive(full.result);
-            })
-            .catch(function () { finishLive(null); });
+          if (!state.running) { closeLiveStream(); return; } // 已完成，正常收尾
+          $('liveStatus').className = 'live-status';
+          $('liveStatus').textContent = '连接中断，正在自动重连…（实验在服务端继续执行）';
         };
       })
       .catch(function (e) {
@@ -557,6 +586,10 @@
   }
 
   function resetLive() {
+    closeLiveStream();
+    state.liveExpId = null;
+    state.liveLastSeq = 0;
+    state.liveResult = null;
     var frame = buildLiveFrame(6, 6, 'healthy');
     state.script = null;
     state.baseNodes = frame.nodes;
