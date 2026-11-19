@@ -1,0 +1,6 @@
+# 忽略 Go 编译产物与本地调试文件
+live/infragym-live
+live/*.test
+*.out
+.DS_Store
+*.log

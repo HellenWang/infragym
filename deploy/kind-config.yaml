@@ -1,0 +1,14 @@
+# kind 集群配置：一个 control-plane + 两个 worker。
+# 端口 30080 映射到 host，方便从宿主机访问 Prometheus（可选）。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: infragym
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30900
+        hostPort: 9090
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+  - role: worker
+  - role: worker

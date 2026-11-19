@@ -1,0 +1,58 @@
+# InfraGym 演练用的 demo workload。
+# 6 个副本，带 readinessProbe，故障注入后能真实反映到 ready 副本数上。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infragym-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infragym-demo
+  namespace: infragym-demo
+  labels:
+    app: infragym-demo
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: infragym-demo
+  template:
+    metadata:
+      labels:
+        app: infragym-demo
+    spec:
+      containers:
+        - name: web
+          image: hashicorp/http-echo:1.0
+          args:
+            - "-listen=:8080"
+            - "-text=infragym-demo-ok"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 1
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infragym-demo
+  namespace: infragym-demo
+spec:
+  selector:
+    app: infragym-demo
+  ports:
+    - port: 80
+      targetPort: 8080

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InfraGym — 云基础设施故障演练场</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="scanline" aria-hidden="true"></div>
+
+<!-- ============ TOP BAR ============ -->
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">
+      <span class="bm-dot"></span><span class="bm-dot"></span><span class="bm-dot"></span>
+      <span class="bm-dot"></span><span class="bm-dot core"></span><span class="bm-dot"></span>
+      <span class="bm-dot"></span><span class="bm-dot"></span><span class="bm-dot"></span>
+    </div>
+    <div class="brand-text">
+      <div class="brand-name">INFRA<span>GYM</span></div>
+      <div class="brand-sub">云基础设施故障演练场 <span class="sep">/</span> deterministic simulation lab</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="mode-switch" id="modeSwitch" title="模拟模式无需集群；真实模式连接 control plane 做真故障注入">
+      <button class="mode-btn active" data-mode="sim">SIM</button>
+      <button class="mode-btn" data-mode="live">LIVE</button>
+    </div>
+    <div class="sys-chip"><span class="pulse-dot" id="engineDot"></span><span id="engineState">ENGINE IDLE</span></div>
+    <label class="seed-field" title="相同 seed + 相同策略 = 完全相同的结果">
+      <span class="seed-label">SEED</span>
+      <input id="seedInput" type="number" value="42" min="0" max="999999999">
+      <button id="seedLockBtn" class="seed-lock" title="锁定 seed 以获得可复现实验">UNLOCKED</button>
+    </label>
+    <div class="clock" id="simClock">T+000.0s</div>
+  </div>
+</header>
+
+<!-- ============ MAIN LAYOUT ============ -->
+<main class="layout">
+
+  <!-- ---------- LEFT: CONTROL PANEL ---------- -->
+  <aside class="panel panel-left">
+    <section class="block live-only" id="liveConfig">
+      <div class="block-title"><span class="idx">LIVE</span> 数据源 <span class="block-en">DATA SOURCE</span></div>
+      <label class="live-field">
+        <span>Control plane 地址</span>
+        <input id="liveUrl" type="text" value="http://127.0.0.1:8088" spellcheck="false">
+      </label>
+      <button id="liveConnectBtn" class="btn btn-ghost" style="width:100%;margin-top:8px">测试连接</button>
+      <div class="live-status" id="liveStatus">未连接 · 先在有 Docker 的机器上运行 deploy/bootstrap.sh</div>
+      <p class="tip">真实模式会调用 chaos-mesh 杀真实 Pod，指标取自 Prometheus。仅 S1 节点故障自愈支持真实注入。</p>
+    </section>
+
+    <section class="block">
+      <div class="block-title"><span class="idx">01</span> 演练场景 <span class="block-en">SCENARIO</span></div>
+      <div class="scenario-list" id="scenarioList">
+        <button class="scenario active" data-scenario="node-loss">
+          <span class="sc-code">S1</span>
+          <span class="sc-body"><strong>节点故障自愈</strong><small>node loss · detect → migrate → recover</small></span>
+          <span class="sc-arrow">›</span>
+        </button>
+        <button class="scenario" data-scenario="rolling-upgrade">
+          <span class="sc-code">S2</span>
+          <span class="sc-body"><strong>滚动升级保护</strong><small>rolling upgrade · health gate → pause → rollback</small></span>
+          <span class="sc-tag sim-only">SIM</span>
+        </button>
+        <button class="scenario" data-scenario="scheduler">
+          <span class="sc-code">S3</span>
+          <span class="sc-body"><strong>调度重排</strong><small>reschedule · bin-pack → spread → rebalance</small></span>
+          <span class="sc-tag sim-only">SIM</span>
+        </button>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-title"><span class="idx">02</span> 控制策略 <span class="block-en">POLICY</span></div>
+      <div class="param-list">
+        <label class="param">
+          <span class="param-head"><span>健康检查间隔</span><b id="vHealth">3.0s</b></span>
+          <input type="range" id="pHealth" min="1" max="8" step="0.5" value="3">
+          <span class="param-hint">越短发现越快，探测流量越高</span>
+        </label>
+        <label class="param">
+          <span class="param-head"><span>迁移并发度</span><b id="vConcurrency">2</b></span>
+          <input type="range" id="pConcurrency" min="1" max="6" step="1" value="2">
+          <span class="param-hint">同时迁移的工作负载数量</span>
+        </label>
+        <label class="param">
+          <span class="param-head"><span>重试上限</span><b id="vRetry">2</b></span>
+          <input type="range" id="pRetry" min="0" max="5" step="1" value="2">
+          <span class="param-hint">单个负载迁移失败后的重试次数</span>
+        </label>
+        <label class="param">
+          <span class="param-head"><span>故障节点数</span><b id="vNodes">3</b></span>
+          <input type="range" id="pNodes" min="1" max="8" step="1" value="3">
+          <span class="param-hint">本次演练注入的节点故障数量</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-title"><span class="idx">03</span> 控制台 <span class="block-en">ACTION</span></div>
+      <div class="action-row">
+        <button id="injectBtn" class="btn btn-primary">
+          <span class="btn-glyph">⚡</span> 注入故障 <span class="btn-key">RUN</span>
+        </button>
+        <button id="resetBtn" class="btn btn-ghost" title="恢复集群初始状态">重置</button>
+      </div>
+      <div class="action-meta">
+        <span>速度</span>
+        <div class="speed-group" id="speedGroup">
+          <button data-speed="0.5">0.5×</button>
+          <button data-speed="1" class="active">1×</button>
+          <button data-speed="2">2×</button>
+          <button data-speed="4">4×</button>
+        </div>
+      </div>
+      <p class="tip">提示：锁定 SEED 后，用不同策略重复演练即可在右侧得到可对比的实验结果。</p>
+    </section>
+  </aside>
+
+  <!-- ---------- CENTER: TOPOLOGY STAGE ---------- -->
+  <section class="stage">
+    <div class="stage-head">
+      <div>
+        <div class="stage-title">集群拓扑 <span class="stage-en">/ CLUSTER TOPOLOGY</span></div>
+        <div class="stage-desc" id="stageDesc">18 节点 · 3 可用区 · 控制面健康</div>
+      </div>
+      <div class="legend" id="legend">
+        <span><i class="lg lg-healthy"></i>健康</span>
+        <span><i class="lg lg-degraded"></i>降级</span>
+        <span><i class="lg lg-failed"></i>故障</span>
+        <span><i class="lg lg-recovering"></i>恢复中</span>
+      </div>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="topoCanvas"></canvas>
+      <div class="canvas-corner tl" aria-hidden="true"></div>
+      <div class="canvas-corner tr" aria-hidden="true"></div>
+      <div class="canvas-corner bl" aria-hidden="true"></div>
+      <div class="canvas-corner br" aria-hidden="true"></div>
+      <div class="hover-card" id="hoverCard"></div>
+    </div>
+    <div class="stage-stats" id="stageStats">
+      <div class="sstat"><span class="sstat-k">HEALTHY</span><b id="statHealthy">18</b></div>
+      <div class="sstat"><span class="sstat-k">DEGRADED</span><b id="statDegraded">0</b></div>
+      <div class="sstat"><span class="sstat-k">FAILED</span><b id="statFailed">0</b></div>
+      <div class="sstat"><span class="sstat-k">WORKLOADS</span><b id="statWorkloads">0</b></div>
+      <div class="sstat"><span class="sstat-k">AVAILABILITY</span><b id="statAvail">100.0%</b></div>
+    </div>
+  </section>
+
+  <!-- ---------- RIGHT: TELEMETRY ---------- -->
+  <aside class="panel panel-right">
+    <section class="block block-timeline">
+      <div class="block-title"><span class="idx">04</span> 事件时间线 <span class="block-en">EVENT STREAM</span></div>
+      <div class="timeline" id="timeline">
+        <div class="tl-empty">// 等待注入故障<br><span>系统就绪，事件将在此实时流式输出</span></div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-title"><span class="idx">05</span> 本次结果 <span class="block-en">RESULT</span></div>
+      <div class="result-grid">
+        <div class="result-cell"><span>MTTR</span><b id="rMttr">—</b><small>平均恢复时间</small></div>
+        <div class="result-cell"><span>IMPACT</span><b id="rImpact">—</b><small>受影响负载</small></div>
+        <div class="result-cell"><span>DETECT</span><b id="rDetect">—</b><small>故障发现延迟</small></div>
+        <div class="result-cell"><span>RECOVERY</span><b id="rRecovery">—</b><small>成功率</small></div>
+      </div>
+    </section>
+
+    <section class="block block-compare">
+      <div class="block-title"><span class="idx">06</span> 策略对比 <span class="block-en">COMPARE</span>
+        <button id="clearCompare" class="mini-btn" title="清空对比记录">CLEAR</button>
+      </div>
+      <div class="compare-hint">相同 SEED 下，不同策略的结果</div>
+      <div class="compare-list" id="compareList">
+        <div class="cmp-empty">尚无记录 · 跑完一次演练后点击「记录本轮」</div>
+      </div>
+      <button id="recordBtn" class="btn btn-record" disabled>＋ 记录本轮结果</button>
+    </section>
+  </aside>
+</main>
+
+<!-- ============ FOOTER / STATUS BAR ============ -->
+<footer class="statusbar">
+  <div class="sb-left">
+    <span class="sb-ok"><span class="pulse-dot green"></span>SYSTEM ONLINE</span>
+    <span>ENGINE: <b id="sbEngine">deterministic-v1</b></span>
+    <span>MODE: <b id="sbMode">SIMULATED</b></span>
+  </div>
+  <div class="sb-right">
+    <span id="sbNote">NO REAL CLOUD CREDENTIALS REQUIRED</span>
+    <span class="sb-brand">INFRA<span>GYM</span> / LAB BUILD</span>
+  </div>
+</footer>
+
+<script src="js/engine.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
